@@ -11,3 +11,4 @@ debug_furniture_agent
 .pytest_cache/
 .vscode/
 .mcp.json
+run_logs/
