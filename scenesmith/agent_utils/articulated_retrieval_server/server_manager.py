@@ -9,6 +9,7 @@ from threading import Thread
 import requests
 
 from omegaconf import DictConfig
+from werkzeug.serving import BaseWSGIServer, make_server
 
 from scenesmith.agent_utils.articulated_retrieval_server.config import ArticulatedConfig
 from scenesmith.utils.network_utils import is_port_available
@@ -74,6 +75,7 @@ class ArticulatedRetrievalServer:
         self._articulated_config = articulated_config
         self._clip_device = clip_device
         self._app: ArticulatedRetrievalApp | None = None
+        self._http_server: BaseWSGIServer | None = None
         self._server_thread: Thread | None = None
         self._running = False
         self._shutdown_event = threading.Event()
@@ -95,6 +97,7 @@ class ArticulatedRetrievalServer:
         console_logger.info(
             f"Starting articulated retrieval server on {self._host}:{self._port}"
         )
+        self._shutdown_event.clear()
 
         try:
             # Create the Flask application.
@@ -107,10 +110,19 @@ class ArticulatedRetrievalServer:
             # Start the processing queue.
             self._app.start_processing()
 
-            # Start Flask server in a separate thread.
+            # Own the Werkzeug server explicitly. Flask's development server no
+            # longer exposes ``werkzeug.server.shutdown`` in the request
+            # environment on current Werkzeug releases.
+            self._http_server = make_server(
+                self._host,
+                self._port,
+                self._app,
+                threaded=True,
+            )
             self._server_thread = Thread(
                 target=self._run_server,
                 daemon=False,  # Not daemon so we can shut down cleanly.
+                name="ArticulatedRetrievalHTTPServer",
             )
             self._server_thread.start()
 
@@ -126,6 +138,15 @@ class ArticulatedRetrievalServer:
             )
 
         except Exception as e:
+            self._shutdown_http_server()
+            if self._app is not None:
+                try:
+                    self._app.stop_processing()
+                except Exception as stop_error:
+                    console_logger.warning(
+                        "Failed to stop articulated retrieval processing during "
+                        f"startup cleanup: {stop_error}"
+                    )
             self._cleanup()
             console_logger.error(f"Failed to start server: {e}")
             raise
@@ -141,29 +162,11 @@ class ArticulatedRetrievalServer:
         # Signal shutdown.
         self._shutdown_event.set()
 
-        # Stop the processing queue.
+        # Stop accepting HTTP requests before tearing down processing state.
+        self._shutdown_http_server()
+
         if self._app:
             self._app.stop_processing()
-
-        # Trigger Flask server shutdown via shutdown endpoint.
-        try:
-            response = requests.post(
-                f"http://{self._host}:{self._port}/shutdown", timeout=2
-            )
-            if response.status_code == 200:
-                console_logger.debug("Shutdown endpoint called successfully")
-            else:
-                console_logger.warning(
-                    f"Shutdown endpoint returned status {response.status_code}"
-                )
-        except requests.exceptions.RequestException as e:
-            console_logger.warning(f"Failed to call shutdown endpoint: {e}")
-
-        # Wait for server thread to complete.
-        if self._server_thread and self._server_thread.is_alive():
-            self._server_thread.join(timeout=5)
-            if self._server_thread.is_alive():
-                console_logger.warning("Server thread did not stop gracefully")
 
         self._cleanup()
         console_logger.info("Articulated retrieval server stopped")
@@ -201,18 +204,37 @@ class ArticulatedRetrievalServer:
         return self._port
 
     def _run_server(self) -> None:
-        """Run the Flask server in a separate thread."""
+        """Run the managed Werkzeug server in a separate thread."""
+        http_server = self._http_server
+        if http_server is None:
+            console_logger.error("HTTP server was not initialized")
+            self._shutdown_event.set()
+            return
+
         try:
-            self._app.run(
-                host=self._host,
-                port=self._port,
-                debug=False,
-                threaded=True,
-                use_reloader=False,  # Important: avoid reloader in thread.
-            )
+            http_server.serve_forever()
         except Exception as e:
             console_logger.error(f"Server thread failed: {e}")
+        finally:
             self._shutdown_event.set()
+
+    def _shutdown_http_server(self) -> None:
+        """Stop the HTTP serve loop and wait for its owning thread to exit."""
+        http_server = self._http_server
+        server_thread = self._server_thread
+
+        if http_server is not None and server_thread is not None:
+            if server_thread.is_alive():
+                try:
+                    http_server.shutdown()
+                except Exception as e:
+                    console_logger.warning(f"Failed to shut down HTTP server: {e}")
+
+            # Thread.start() can itself fail; never join an unstarted thread.
+            if server_thread.ident is not None:
+                server_thread.join(timeout=5)
+                if server_thread.is_alive():
+                    console_logger.warning("Server thread did not stop gracefully")
 
     def _wait_until_ready(self, timeout: float = 30) -> None:
         """Wait for server to be ready to accept requests.
@@ -225,9 +247,13 @@ class ArticulatedRetrievalServer:
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
+            if self._shutdown_event.is_set():
+                raise RuntimeError("HTTP server stopped before becoming ready")
             try:
                 response = requests.get(
-                    f"http://{self._host}:{self._port}/health", timeout=1
+                    f"http://{self._host}:{self._port}/health",
+                    timeout=1,
+                    proxies={"http": None, "https": None},
                 )
                 if response.status_code == 200:
                     return
@@ -240,8 +266,14 @@ class ArticulatedRetrievalServer:
 
     def _cleanup(self) -> None:
         """Clean up server resources."""
+        if self._http_server is not None:
+            try:
+                self._http_server.server_close()
+            except OSError as e:
+                console_logger.warning(f"Failed to close HTTP server socket: {e}")
         self._running = False
         self._app = None
+        self._http_server = None
         self._server_thread = None
         self._shutdown_event.clear()
 

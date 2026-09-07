@@ -423,7 +423,12 @@ def render_per_drawer_views(
             }
 
             # 9. Send config to Blender.
-            response = requests.post(config_url, json=drawer_config, timeout=10)
+            response = requests.post(
+                config_url,
+                json=drawer_config,
+                timeout=10,
+                proxies={"http": None, "https": None},
+            )
             if response.status_code != 200:
                 console_logger.warning(
                     f"Failed to set drawer config for {joint_name}: "
@@ -606,7 +611,12 @@ def render_per_wall_ortho_views(
         wall_config["scene_objects"] = scene_objects_metadata
 
         # Set config on Blender server.
-        response = requests.post(config_url, json=wall_config, timeout=10)
+        response = requests.post(
+            config_url,
+            json=wall_config,
+            timeout=10,
+            proxies={"http": None, "https": None},
+        )
         if response.status_code != 200:
             console_logger.error(
                 f"Failed to set wall config for {wall_id}: {response.text}"
@@ -1248,7 +1258,12 @@ def render_scene_for_agent_observation(
         config_payload["show_support_surface"] = show_support_surface
 
         # Send overlay config to Blender server.
-        response = requests.post(config_url, json=config_payload, timeout=10)
+        response = requests.post(
+            config_url,
+            json=config_payload,
+            timeout=10,
+            proxies={"http": None, "https": None},
+        )
         if response.status_code != 200:
             raise RuntimeError(
                 f"Failed to set overlay config: {response.status_code} "
@@ -1383,7 +1398,12 @@ def save_scene_as_blend(
         config_url = f"{server.get_url()}/set_blend_config"
         config_payload = {"output_path": str(output_path.absolute())}
 
-        response = requests.post(config_url, json=config_payload, timeout=10)
+        response = requests.post(
+            config_url,
+            json=config_payload,
+            timeout=10,
+            proxies={"http": None, "https": None},
+        )
         if response.status_code != 200:
             raise RuntimeError(f"Failed to set blend config: {response.text}")
 
@@ -1492,7 +1512,12 @@ def save_directive_as_blend(
             config_url = f"{server.get_url()}/set_blend_config"
             config_payload = {"output_path": str(output_path.absolute())}
 
-            response = requests.post(config_url, json=config_payload, timeout=10)
+            response = requests.post(
+            config_url,
+            json=config_payload,
+            timeout=10,
+            proxies={"http": None, "https": None},
+        )
             if response.status_code != 200:
                 raise RuntimeError(f"Failed to set blend config: {response.text}")
 

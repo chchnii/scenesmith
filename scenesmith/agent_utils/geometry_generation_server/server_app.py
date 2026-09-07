@@ -84,9 +84,6 @@ class GeometryGenerationApp(flask.Flask):
         # Setup routes.
         self.add_url_rule("/health", "health", self._health_endpoint, methods=["GET"])
         self.add_url_rule(
-            "/shutdown", "shutdown", self._shutdown_endpoint, methods=["POST"]
-        )
-        self.add_url_rule(
             "/generate_geometries",
             "generate_geometries",
             self._generate_geometries_endpoint,
@@ -191,23 +188,6 @@ class GeometryGenerationApp(flask.Flask):
                 "workers": pool_stats.worker_details,
             }
         )
-
-    def _shutdown_endpoint(self) -> flask.Response:
-        """Shutdown endpoint for graceful server termination."""
-        console_logger.info("Shutdown endpoint called")
-
-        # Get the shutdown function from werkzeug.
-        shutdown_func = flask.request.environ.get("werkzeug.server.shutdown")
-
-        if shutdown_func is None:
-            console_logger.warning(
-                "Not running with the Werkzeug Server, cannot shutdown"
-            )
-            return flask.jsonify({"status": "error", "message": "shutdown failed"}), 500
-
-        # Shutdown the server.
-        shutdown_func()
-        return flask.jsonify({"status": "shutting down"}), 200
 
     def _generate_geometries_endpoint(self) -> flask.Response:
         """Handle batch geometry generation requests with streaming response."""

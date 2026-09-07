@@ -49,6 +49,10 @@ class GeometryGenerationClient:
         """
         self.base_url = f"http://{host}:{port}"
         self.session = requests.Session()
+        # These clients only talk to the local Blender/server on loopback. Disable
+        # env-proxy (HTTP(S)_PROXY) so requests hit the local server directly instead
+        # of being routed through e.g. socks5h://127.0.0.1:1080.
+        self.session.trust_env = False
         console_logger.debug(
             f"Geometry generation client initialized for {self.base_url}"
         )

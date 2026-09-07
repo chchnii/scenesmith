@@ -22,6 +22,8 @@ from omegaconf import DictConfig
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 
+from scenesmith._compat import RateLimitRetryOpenAI
+
 from scenesmith.prompts import prompt_registry
 from scenesmith.prompts.registry import SessionMemoryPrompts
 
@@ -382,7 +384,7 @@ class TurnTrimmingSession:
     def _get_openai_client(self) -> AsyncOpenAI:
         """Get or create the OpenAI client for summarization."""
         if self._openai_client is None:
-            self._openai_client = AsyncOpenAI()
+            self._openai_client = RateLimitRetryOpenAI()
         return self._openai_client
 
     async def _summarize_turn(self, turn: Turn, turn_number: int) -> str:
@@ -424,13 +426,23 @@ class TurnTrimmingSession:
         )
 
         try:
-            response = await self._get_openai_client().responses.create(
+            # NOTE: Uses the Chat Completions API because the JD Cloud API
+            # gateway does not support the Responses API.
+            extra_kwargs: dict[str, Any] = {}
+            if reasoning is not None:
+                extra_kwargs["reasoning_effort"] = reasoning.effort
+            response = await self._get_openai_client().chat.completions.create(
                 model=self._summarization_model,
-                instructions=summarization_prompt,
-                input=text,
-                reasoning=reasoning,
+                messages=[
+                    {"role": "system", "content": summarization_prompt},
+                    {"role": "user", "content": text},
+                ],
+                **extra_kwargs,
             )
-            summary = response.output_text or "[Summary generation failed]"
+            summary = (
+                response.choices[0].message.content
+                or "[Summary generation failed]"
+            )
         except Exception as e:
             console_logger.error(f"Summarization failed: {e}")
             # Fallback: just strip images without summarizing.

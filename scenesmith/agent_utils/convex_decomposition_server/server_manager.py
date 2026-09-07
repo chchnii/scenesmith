@@ -269,7 +269,11 @@ class ConvexDecompositionServer:
         max_retries = int(timeout * 2)  # Check twice per second.
         for i in range(max_retries):
             try:
-                response = requests.get(f"{self.get_url()}/health", timeout=2)
+                response = requests.get(
+                    f"{self.get_url()}/health",
+                    timeout=2,
+                    proxies={"http": None, "https": None},
+                )
                 if response.status_code == 200:
                     elapsed = time.time() - start_time
                     console_logger.debug(

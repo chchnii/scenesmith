@@ -5,12 +5,10 @@ Main file for the project. This will create and run new experiments.
 import logging
 import os
 import time
-
 from datetime import timedelta
 from pathlib import Path
 
 import hydra
-
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.omegaconf import open_dict
 
@@ -20,9 +18,21 @@ import bpy  # noqa: F401
 
 # isort: on
 
+from agents import set_default_openai_api
+
+# Apply openai-agents / openai SDK compatibility patch (see scenesmith._compat).
+# This must happen before any Agent/OpenAIProvider creates its client; clients
+# that already exist cannot be converted to the retry-aware subclass.
+from scenesmith._compat import apply_compat_patches
 from scenesmith.utils.logging import FileLoggingContext
 from scenesmith.utils.omegaconf import register_resolvers
 from scenesmith.utils.print_utils import cyan
+
+apply_compat_patches()
+
+# The JD Cloud API gateway only supports the Chat Completions API, not the
+# Responses API that the agents SDK uses by default.
+set_default_openai_api("chat_completions")
 
 console_logger = logging.getLogger(__name__)
 
@@ -66,7 +76,7 @@ def run_local(cfg: DictConfig):
 
     with FileLoggingContext(log_file_path=experiment_log_path, suppress_stdout=False):
         console_logger.info(f"Outputs will be saved to: {output_dir}")
-        print(cyan(f"Outputs will be saved to:"), output_dir)
+        print(cyan("Outputs will be saved to:"), output_dir)
 
         (output_dir.parents[1] / "latest-run").unlink(missing_ok=True)
         (output_dir.parents[1] / "latest-run").symlink_to(

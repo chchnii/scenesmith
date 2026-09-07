@@ -48,6 +48,8 @@ class HssdRetrievalClient:
         """
         self.base_url = f"http://{host}:{port}"
         self.session = requests.Session()
+        # Local loopback service — ignore HTTP(S)_PROXY env vars.
+        self.session.trust_env = False
         console_logger.debug(f"HSSD retrieval client initialized for {self.base_url}")
 
     def retrieve_objects(

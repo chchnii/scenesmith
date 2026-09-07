@@ -1,7 +1,6 @@
 import shutil
 import tempfile
 import unittest
-
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,9 +15,9 @@ from scenesmith.agent_utils.image_generation import (
 # Mock hy3dgen modules for CI where Hunyuan3D-2 is not installed.
 # This allows the @patch decorators to work even when the real modules don't exist.
 try:
-    import hy3dgen.rembg  # noqa: F401
-    import hy3dgen.shapegen  # noqa: F401
-    import hy3dgen.texgen  # noqa: F401
+    import hy3dgen.rembg
+    import hy3dgen.shapegen
+    import hy3dgen.texgen
 except ImportError:
     # Only mock if real modules don't exist (CI environment).
     import sys
@@ -90,7 +89,7 @@ class TestOpenAIImageGenerator(unittest.TestCase):
         # Verify OpenAI API was called correctly.
         self.mock_client.images.generate.assert_called_once()
         call_kwargs = self.mock_client.images.generate.call_args[1]
-        self.assertEqual(call_kwargs["model"], "gpt-image-1.5")
+        self.assertEqual(call_kwargs["model"], "gpt-image-1")
         self.assertEqual(call_kwargs["size"], "1024x1024")
         self.assertEqual(call_kwargs["quality"], "low")
         self.assertEqual(call_kwargs["background"], "opaque")

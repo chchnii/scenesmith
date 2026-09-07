@@ -86,9 +86,6 @@ class MaterialsRetrievalApp(flask.Flask):
         # Setup routes.
         self.add_url_rule("/health", "health", self._health_endpoint, methods=["GET"])
         self.add_url_rule(
-            "/shutdown", "shutdown", self._shutdown_endpoint, methods=["POST"]
-        )
-        self.add_url_rule(
             "/retrieve_materials",
             "retrieve_materials",
             self._retrieve_materials_endpoint,
@@ -340,22 +337,6 @@ class MaterialsRetrievalApp(flask.Flask):
                 "retriever_loaded": self._retriever is not None,
             }
         )
-
-    def _shutdown_endpoint(self) -> flask.Response:
-        """Shutdown endpoint for graceful termination."""
-        console_logger.info("Shutdown endpoint called")
-
-        shutdown_func = flask.request.environ.get("werkzeug.server.shutdown")
-
-        if shutdown_func is None:
-            console_logger.warning("Not running with Werkzeug Server, cannot shutdown.")
-            return (
-                flask.jsonify({"status": "error", "message": "shutdown failed"}),
-                500,
-            )
-
-        shutdown_func()
-        return flask.jsonify({"status": "shutting down"}), 200
 
     def _retrieve_materials_endpoint(self) -> flask.Response:
         """Handle batch retrieval requests with streaming response."""

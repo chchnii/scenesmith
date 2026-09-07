@@ -14,6 +14,7 @@ from omegaconf import DictConfig
 from openai import OpenAI
 from PIL import Image
 
+from scenesmith._compat import RateLimitOpenAI
 from scenesmith.prompts import PROMPTS_DATA_DIR
 from scenesmith.prompts.manager import PromptManager
 from scenesmith.prompts.registry import ImageGenerationPrompts
@@ -134,10 +135,11 @@ class OpenAIImageGenerator(BaseImageGenerator):
                 "OPENAI_API_KEY environment variable is required for OpenAI image "
                 "generation. Set it with: export OPENAI_API_KEY='your-key'"
             )
-        self.client = client or OpenAI()
+        self.client = client or RateLimitOpenAI()
         self.prompt_manager = PromptManager(prompts_dir=PROMPTS_DATA_DIR)
         self.image_quality = quality
-        self.model = "gpt-image-1.5"
+        # NOTE: The JD Cloud API gateway only exposes gpt-image-1 (not 1.5).
+        self.model = "gpt-image-1"
 
     def generate_images(
         self,

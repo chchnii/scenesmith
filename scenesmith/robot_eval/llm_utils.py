@@ -11,6 +11,8 @@ from typing import TypeVar
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from scenesmith._compat import RateLimitRetryOpenAI
+
 console_logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -23,7 +25,7 @@ def _get_client() -> AsyncOpenAI:
     """Get or create the async OpenAI client."""
     global _client
     if _client is None:
-        _client = AsyncOpenAI()
+        _client = RateLimitRetryOpenAI()
     return _client
 
 

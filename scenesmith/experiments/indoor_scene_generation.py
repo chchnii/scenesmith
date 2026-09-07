@@ -1348,10 +1348,12 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             backend=backend,
             sam3d_config=sam3d_config,
             log_file=self.output_dir / "experiment.log",
+            preload_pipeline=self.cfg.experiment.geometry_generation_server.preload_pipeline,
+            start_timeout=self.cfg.experiment.geometry_generation_server.start_timeout,
         )
 
         self.geometry_server.start()
-        self.geometry_server.wait_until_ready(timeout_s=30.0)
+        self.geometry_server.wait_until_ready(timeout_s=180.0)
         console_logger.info("Geometry generation server ready")
 
     def _stop_geometry_server(self) -> None:
@@ -1843,8 +1845,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                     )
 
-            except Exception as e:
-                console_logger.error(f"Scene generation failed: {e}")
+            except (KeyboardInterrupt, asyncio.CancelledError) as e:
+                console_logger.error(
+                    "Scene generation interrupted (%s): %s",
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                raise
+            except Exception:
+                console_logger.exception("Scene generation failed")
                 raise
 
     def _run_serial_generation(
@@ -2007,6 +2017,18 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             console_logger.info(yellow("Press Ctrl+C to exit the script."))
             console_logger.info("=" * 60)
 
+        except (KeyboardInterrupt, asyncio.CancelledError) as e:
+            # These inherit directly from BaseException in supported Python
+            # versions, so a regular ``except Exception`` does not record them.
+            # Log before service teardown so the cause is not hidden behind
+            # shutdown messages or a stuck cleanup thread.
+            console_logger.error(
+                "Scene generation run interrupted (%s): %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            raise
         finally:
             # Stop GPU servers.
             self._stop_materials_server()

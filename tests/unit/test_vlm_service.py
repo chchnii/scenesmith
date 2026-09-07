@@ -1,7 +1,6 @@
 import shutil
 import tempfile
 import unittest
-
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -20,7 +19,7 @@ class TestVLMService(unittest.TestCase):
         """Clean up test fixtures."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_vlm_initialization(self, mock_openai_class):
         """Test VLMService initializes OpenAI client properly."""
         mock_openai_class.return_value = self.mock_openai_client
@@ -34,7 +33,7 @@ class TestVLMService(unittest.TestCase):
         # Verify OpenAI client was created.
         mock_openai_class.assert_called_once()
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_create_completion_basic(self, mock_openai_class):
         """Test create_completion with basic parameters for standard models."""
         mock_openai_client = Mock()
@@ -69,7 +68,7 @@ class TestVLMService(unittest.TestCase):
         call_args = mock_openai_client.chat.completions.create.call_args
         self.assertEqual(call_args[1]["model"], model)
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_create_completion_with_reasoning_effort_and_verbosity(
         self, mock_openai_class
     ):
@@ -83,6 +82,9 @@ class TestVLMService(unittest.TestCase):
         mock_openai_client.responses.create.return_value = mock_response
 
         vlm_service = VLMService()
+        # JD Cloud defaults all models to Chat Completions; opt into the
+        # Responses branch explicitly so this test continues to cover it.
+        vlm_service._reasoning_models.add("gpt-5")
 
         messages = [{"role": "user", "content": "Complex reasoning task"}]
         model = "gpt-5"
@@ -107,7 +109,7 @@ class TestVLMService(unittest.TestCase):
         self.assertIn("text", call_args[1])
         self.assertEqual(call_args[1]["text"]["verbosity"], verbosity)
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_create_completion_with_json_format(self, mock_openai_class):
         """Test create_completion with JSON response format."""
         mock_openai_client = Mock()
@@ -143,7 +145,7 @@ class TestVLMService(unittest.TestCase):
         self.assertEqual(call_args[1]["model"], model)
         self.assertEqual(call_args[1]["response_format"], {"type": "json_object"})
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_error_handling_for_api_failures(self, mock_openai_class):
         """Test handling of OpenAI API errors."""
         mock_openai_client = Mock()
@@ -168,7 +170,7 @@ class TestVLMService(unittest.TestCase):
 
         self.assertIn("API rate limit exceeded", str(context.exception))
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_message_conversion_to_responses_format(self, mock_openai_class):
         """Test that messages work correctly for reasoning models with images."""
         mock_openai_client = Mock()
@@ -180,6 +182,9 @@ class TestVLMService(unittest.TestCase):
         mock_openai_client.responses.create.return_value = mock_response
 
         vlm_service = VLMService()
+        # JD Cloud defaults all models to Chat Completions; opt into the
+        # Responses branch explicitly so this test continues to cover it.
+        vlm_service._reasoning_models.add("gpt-5")
 
         # Test with image content in messages for reasoning model.
         messages = [
@@ -211,7 +216,7 @@ class TestVLMService(unittest.TestCase):
         call_args = mock_openai_client.responses.create.call_args
         self.assertIn("input", call_args[1])
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_vision_detail_parameter_chat_completions(self, mock_openai_class):
         """Test that vision_detail parameter is added to image_url objects for Chat
         API."""
@@ -269,7 +274,7 @@ class TestVLMService(unittest.TestCase):
         self.assertIsNotNone(image_content)
         self.assertEqual(image_content["image_url"]["detail"], "high")
 
-    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    @patch("scenesmith.agent_utils.vlm_service.RateLimitOpenAI")
     def test_vision_detail_parameter_responses_api(self, mock_openai_class):
         """Test vision_detail parameter handling for Responses API (reasoning models)."""
         mock_openai_client = Mock()
@@ -281,6 +286,9 @@ class TestVLMService(unittest.TestCase):
         mock_openai_client.responses.create.return_value = mock_response
 
         vlm_service = VLMService()
+        # JD Cloud defaults all models to Chat Completions; opt into the
+        # Responses branch explicitly so this test continues to cover it.
+        vlm_service._reasoning_models.add("gpt-5")
 
         # Test with image content in messages for reasoning model.
         messages = [

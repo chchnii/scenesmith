@@ -290,6 +290,7 @@ def _render_validation_scene(
         f"{blender_server.get_url()}/set_overlay_config",
         json=config_payload,
         timeout=10,
+        proxies={"http": None, "https": None},
     )
     if response.status_code != 200:
         raise RuntimeError(

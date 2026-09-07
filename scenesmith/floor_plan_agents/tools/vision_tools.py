@@ -592,6 +592,7 @@ class FloorPlanVisionTools:
                     "height": self.render_size,
                 },
                 timeout=10,
+                proxies={"http": None, "https": None},
             )
             config_response.raise_for_status()
             console_logger.info("Floor plan config set on Blender server")

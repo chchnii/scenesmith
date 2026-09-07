@@ -156,7 +156,12 @@ class ConvexDecompositionClient:
         )
 
         try:
-            response = requests.post(url, json=payload, timeout=self._timeout)
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=self._timeout,
+                proxies={"http": None, "https": None},
+            )
             response.raise_for_status()
 
             try:
@@ -207,7 +212,11 @@ class ConvexDecompositionClient:
             True if server is healthy, False otherwise.
         """
         try:
-            response = requests.get(f"{self._base_url}/health", timeout=5)
+            response = requests.get(
+                f"{self._base_url}/health",
+                timeout=5,
+                proxies={"http": None, "https": None},
+            )
             return response.status_code == 200
         except requests.RequestException:
             return False

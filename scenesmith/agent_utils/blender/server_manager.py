@@ -420,7 +420,11 @@ class BlenderServer:
 
         for i in range(max_retries):
             try:
-                response = requests.get(f"{self.get_url()}/", timeout=5)
+                response = requests.get(
+                    f"{self.get_url()}/",
+                    timeout=5,
+                    proxies={"http": None, "https": None},
+                )
                 if response.status_code == 200:
                     elapsed = time.time() - start_time
                     console_logger.debug(f"Server is ready after {elapsed}s")
@@ -653,10 +657,19 @@ class BlenderServer:
             try:
                 url = f"{self.get_url()}{endpoint}"
                 if json is not None:
-                    response = requests.post(url, json=json, timeout=timeout)
+                    response = requests.post(
+                        url,
+                        json=json,
+                        timeout=timeout,
+                        proxies={"http": None, "https": None},
+                    )
                 else:
                     response = requests.post(
-                        url, files=files, data=data, timeout=timeout
+                        url,
+                        files=files,
+                        data=data,
+                        timeout=timeout,
+                        proxies={"http": None, "https": None},
                     )
 
                 if response.status_code != 200:
@@ -739,7 +752,11 @@ class BlenderServer:
                 with open(mesh_path, "rb") as f:
                     files = {"mesh": ("mesh.glb", f, "application/octet-stream")}
                     response = requests.post(
-                        url, files=files, data=data, timeout=timeout
+                        url,
+                        files=files,
+                        data=data,
+                        timeout=timeout,
+                        proxies={"http": None, "https": None},
                     )
 
                 if response.status_code != 200:

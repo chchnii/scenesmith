@@ -1,8 +1,7 @@
 import logging
-
 from typing import Any
 
-from openai import OpenAI
+from scenesmith._compat import RateLimitOpenAI
 
 console_logger = logging.getLogger(__name__)
 
@@ -24,9 +23,11 @@ class VLMService:
                 Valid values: "default", "flex", "priority", or None to use
                 project default.
         """
-        self.client = OpenAI()
+        self.client = RateLimitOpenAI()
         # Cache for model type detection.
-        self._reasoning_models = {"gpt-5", "gpt-5.2", "o3", "o4"}
+        # NOTE: Emptied because the JD Cloud API gateway only supports the Chat
+        # Completions API, not the Responses API used for reasoning models.
+        self._reasoning_models: set[str] = set()
         self.service_tier = service_tier
 
     def create_completion(
@@ -120,7 +121,7 @@ class VLMService:
                     f"Empty response from {model} (Chat API). "
                     f"Finish reason: {response.choices[0].finish_reason}, "
                     f"Content type: {type(content).__name__}, "
-                    f"Content repr: {repr(content)}"
+                    f"Content repr: {content!r}"
                 )
 
             return content

@@ -16,6 +16,7 @@ from pathlib import Path
 from threading import Thread
 
 import requests
+from werkzeug.serving import BaseWSGIServer, make_server
 
 from scenesmith.utils.network_utils import is_port_available
 
@@ -83,6 +84,7 @@ class GeometryGenerationServer:
         backend: str = "hunyuan3d",
         sam3d_config: dict | None = None,
         log_file: Path | None = None,
+        start_timeout: float = 180.0,
     ) -> None:
         """Initialize the geometry generation server manager.
 
@@ -93,6 +95,9 @@ class GeometryGenerationServer:
                 When True, the pipeline is loaded during server initialization,
                 eliminating first-request latency. When False, the pipeline is loaded
                 lazily on first request. Default: True.
+            start_timeout: Max seconds to wait for the server to report ready after
+                startup. Cold-starting the SAM3D pipeline exceeds 30s on modern GPUs,
+                so the default is generous. Default: 180.0.
             use_mini: Whether to use the mini model variant (0.6B parameters) instead
                 of the full model. Only applies to Hunyuan3D backend. The mini model
                 is faster with lower memory usage but may have reduced quality.
@@ -119,11 +124,13 @@ class GeometryGenerationServer:
         self._host = host
         self._port = port
         self._preload_pipeline = preload_pipeline
+        self._start_timeout = start_timeout
         self._use_mini = use_mini
         self._backend = backend
         self._sam3d_config = sam3d_config
         self._log_file = log_file
         self._app: GeometryGenerationApp | None = None
+        self._http_server: BaseWSGIServer | None = None
         self._server_thread: Thread | None = None
         self._running = False
         self._shutdown_event = threading.Event()
@@ -150,6 +157,7 @@ class GeometryGenerationServer:
         console_logger.info(
             f"Starting geometry generation server on {self._host}:{self._port}"
         )
+        self._shutdown_event.clear()
 
         try:
             # Create the Flask application with all parameters.
@@ -166,15 +174,25 @@ class GeometryGenerationServer:
             # This spawns GPU workers and preloads pipelines if enabled.
             self._app.start_processing()
 
-            # Start Flask server in a separate thread.
+            # Create an explicitly managed Werkzeug server. Flask's development
+            # ``app.run()`` no longer exposes ``werkzeug.server.shutdown`` in the
+            # request environment, so an HTTP /shutdown endpoint cannot reliably
+            # stop its serve_forever loop on current Werkzeug versions.
+            self._http_server = make_server(
+                self._host,
+                self._port,
+                self._app,
+                threaded=True,
+            )
             self._server_thread = Thread(
                 target=self._run_server,
                 daemon=False,  # Not daemon so we can shut down cleanly.
+                name="GeometryGenerationHTTPServer",
             )
             self._server_thread.start()
 
             # Wait for the server to be ready.
-            self._wait_until_ready()
+            self._wait_until_ready(timeout=self._start_timeout)
             self._running = True
 
             console_logger.info(
@@ -185,6 +203,22 @@ class GeometryGenerationServer:
             )
 
         except Exception as e:
+            # Stop accepting HTTP requests before tearing down processing. This
+            # also releases the listening socket if readiness failed after the
+            # server thread had already started.
+            self._shutdown_http_server()
+
+            # Stop worker processes before dropping the app reference: workers
+            # run with start_new_session=True and would otherwise outlive this
+            # manager as orphan GPU processes.
+            if self._app is not None:
+                try:
+                    self._app.stop_processing()
+                except Exception as stop_error:
+                    console_logger.warning(
+                        f"Failed to stop worker processing during startup "
+                        f"cleanup: {stop_error}"
+                    )
             self._cleanup()
             console_logger.error(f"Failed to start server: {e}")
             raise
@@ -200,38 +234,23 @@ class GeometryGenerationServer:
         # Signal shutdown.
         self._shutdown_event.set()
 
-        # Stop the worker pool and coordinator thread.
+        # Stop accepting new HTTP requests before tearing down the workers.
+        self._shutdown_http_server()
+
+        # Stop the worker pool and coordinator thread after the listening socket
+        # is closed, so no new work can be admitted during teardown.
         if self._app:
             self._app.stop_processing()
-
-        # Trigger Flask server shutdown via shutdown endpoint.
-        try:
-            response = requests.post(
-                f"http://{self._host}:{self._port}/shutdown", timeout=2
-            )
-            if response.status_code == 200:
-                console_logger.debug("Shutdown endpoint called successfully")
-            else:
-                console_logger.warning(
-                    f"Shutdown endpoint returned status {response.status_code}"
-                )
-        except requests.exceptions.RequestException as e:
-            console_logger.warning(f"Failed to call shutdown endpoint: {e}")
-
-        # Wait for server thread to complete.
-        if self._server_thread and self._server_thread.is_alive():
-            self._server_thread.join(timeout=5)
-            if self._server_thread.is_alive():
-                console_logger.warning("Server thread did not stop gracefully")
 
         self._cleanup()
         console_logger.info("Geometry generation server stopped")
 
-    def wait_until_ready(self, timeout_s: float = 30) -> None:
+    def wait_until_ready(self, timeout_s: float | None = None) -> None:
         """Wait for the server to be ready to accept requests.
 
         Args:
-            timeout_s: Maximum time to wait for server readiness.
+            timeout_s: Maximum time to wait for server readiness. If None, uses the
+                configured ``start_timeout``.
 
         Raises:
             RuntimeError: If server doesn't become ready within timeout.
@@ -239,7 +258,7 @@ class GeometryGenerationServer:
         if not self._running:
             raise RuntimeError("Server is not running")
 
-        self._wait_until_ready(timeout_s)
+        self._wait_until_ready(self._start_timeout if timeout_s is None else timeout_s)
 
     def is_running(self) -> bool:
         """Check if the server is currently running.
@@ -260,33 +279,66 @@ class GeometryGenerationServer:
         return self._port
 
     def _run_server(self) -> None:
-        """Run the Flask server in a separate thread."""
+        """Run the managed Werkzeug server in a separate thread."""
+        http_server = self._http_server
+        if http_server is None:
+            console_logger.error("HTTP server was not initialized")
+            self._shutdown_event.set()
+            return
+
         try:
-            self._app.run(
-                host=self._host,
-                port=self._port,
-                debug=False,
-                threaded=True,
-                use_reloader=False,  # Important: avoid reloader in thread.
-            )
+            http_server.serve_forever()
         except Exception as e:
             console_logger.error(f"Server thread failed: {e}")
+        finally:
             self._shutdown_event.set()
 
-    def _wait_until_ready(self, timeout: float = 30) -> None:
+    def _shutdown_http_server(self) -> None:
+        """Stop the HTTP serve loop and wait for its owning thread to exit."""
+        http_server = self._http_server
+        server_thread = self._server_thread
+
+        # BaseServer.shutdown() must be called from a thread other than the one
+        # running serve_forever(). If the thread already exited (for example due
+        # to a bind/runtime error), there is no serve loop to wake.
+        if http_server is not None and server_thread is not None:
+            if server_thread.is_alive():
+                try:
+                    http_server.shutdown()
+                except Exception as e:
+                    console_logger.warning(f"Failed to shut down HTTP server: {e}")
+
+            # ``Thread.start()`` itself can fail. Joining a never-started thread
+            # raises RuntimeError and would mask the original startup exception.
+            if server_thread.ident is not None:
+                server_thread.join(timeout=5)
+                if server_thread.is_alive():
+                    console_logger.warning("Server thread did not stop gracefully")
+
+    def _wait_until_ready(self, timeout: float | None = None) -> None:
         """Wait for server to be ready to accept requests.
 
         Args:
-            timeout: Maximum time to wait.
+            timeout: Maximum time to wait in seconds. If None, uses the configured
+                ``start_timeout``.
 
         Raises:
             RuntimeError: If server doesn't become ready within timeout.
         """
+        if timeout is None:
+            timeout = self._start_timeout
         start_time = time.time()
         while time.time() - start_time < timeout:
+            if self._shutdown_event.is_set():
+                raise RuntimeError("HTTP server stopped before becoming ready")
             try:
+                # Bypass HTTP(S)_PROXY: requests would otherwise route the local
+                # /health probe through the proxy (e.g. socks5h://127.0.0.1:1080),
+                # which cannot reach this loopback server and times out forever.
                 response = requests.get(
-                    f"http://{self._host}:{self._port}/health", timeout=1
+                    f"http://{self._host}:{self._port}/health",
+                    timeout=1,
+                    proxies={"http": None, "https": None},
                 )
                 if response.status_code == 200:
                     return
@@ -299,8 +351,14 @@ class GeometryGenerationServer:
 
     def _cleanup(self) -> None:
         """Clean up server resources."""
+        if self._http_server is not None:
+            try:
+                self._http_server.server_close()
+            except OSError as e:
+                console_logger.warning(f"Failed to close HTTP server socket: {e}")
         self._running = False
         self._app = None
+        self._http_server = None
         self._server_thread = None
         self._shutdown_event.clear()
 

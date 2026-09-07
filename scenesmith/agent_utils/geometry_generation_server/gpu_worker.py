@@ -14,12 +14,21 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import socket
 import time
 
 from dataclasses import dataclass
-from multiprocessing import Queue
 from pathlib import Path
 from typing import Any
+
+from scenesmith.agent_utils.geometry_generation_server.worker_protocol import (
+    MSG_READY,
+    MSG_REQUEST,
+    MSG_RESULT,
+    MSG_SHUTDOWN,
+    recv_message,
+    send_message,
+)
 
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerRequest,
@@ -81,40 +90,44 @@ class WorkerReady:
     """ID of the worker that is now ready."""
 
 
-def gpu_worker_main(
+def socket_worker_run(
+    connection: socket.socket,
     gpu_id: int,
-    work_queue: Queue,
-    result_queue: Queue,
     use_mini: bool,
     backend: str,
     sam3d_config: dict | None,
     preload_pipeline: bool,
-    init_lock: Any = None,
     log_file: str | None = None,
 ) -> None:
-    """Main function for GPU worker subprocess.
+    """Socket-based main loop for a GPU worker subprocess.
 
-    CRITICAL: This function sets CUDA_VISIBLE_DEVICES before ANY CUDA imports.
-    This ensures each worker process only sees its assigned GPU.
+    This replaces the old ``multiprocessing.Queue``-based ``gpu_worker_main``.
+    The worker connects to the parent's Unix-domain socket and exchanges framed
+    JSON messages (see ``worker_protocol``). Running over a fresh socket means a
+    restarted worker never inherits the parent's CUDA state, which is what makes
+    worker auto-restart safe after CUDA has been initialized in the parent.
 
     Args:
+        connection: Connected AF_UNIX socket to the worker pool (parent).
         gpu_id: The GPU index this worker is assigned to.
-        work_queue: Queue to receive work requests from.
-        result_queue: Queue to send results back to coordinator.
         use_mini: Whether to use mini model variant (Hunyuan3D only).
         backend: Generation backend ("hunyuan3d" or "sam3d").
         sam3d_config: Configuration for SAM3D backend.
         preload_pipeline: Whether to preload pipeline on startup.
-        init_lock: Lock to serialize pipeline initialization across workers.
-            SAM3D checkpoints are ~15GB; concurrent loading causes I/O contention.
-        log_file: Optional path to log file for persistent logging.
+        log_file: Optional path to a log file for this worker's stderr copy.
     """
-    import sys
+    # CUDA_VISIBLE_DEVICES is set by the parent via the subprocess environment
+    # (before this interpreter starts), then verified here. It must be set before
+    # ANY CUDA-dependent import.
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible != str(gpu_id):
+        raise RuntimeError(
+            f"CUDA_VISIBLE_DEVICES mismatch: expected {gpu_id}, got {cuda_visible!r}"
+        )
 
-    # FIRST LINE - Set CUDA_VISIBLE_DEVICES before ANY imports.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    # Configure logging for this worker process.
+    # Configure logging for this worker process. basicConfig(force=True)
+    # installs a stderr handler on the root logger; module loggers propagate to
+    # it, so no per-logger stderr handler is added (it would double every line).
     logging.basicConfig(
         level=logging.DEBUG,
         format=f"[GPU-{gpu_id}] %(levelname)s: %(message)s",
@@ -122,69 +135,35 @@ def gpu_worker_main(
     )
     logger = logging.getLogger(__name__)
 
-    # Also log to stderr to ensure output is visible.
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.DEBUG)
-    stderr_handler.setFormatter(
-        logging.Formatter(f"[GPU-{gpu_id}] %(levelname)s: %(message)s")
-    )
-    logger.addHandler(stderr_handler)
-
     # Log to file if path provided (e.g., experiment.log).
     if log_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(
-            logging.Formatter(
-                f"%(asctime)s - [GPU-{gpu_id}] %(levelname)s: %(message)s"
-            )
+            logging.Formatter(f"%(asctime)s - [GPU-{gpu_id}] %(levelname)s: %(message)s")
         )
         logger.addHandler(file_handler)
 
     logger.info(f"Worker starting on GPU {gpu_id}, PID={os.getpid()}")
-    logger.debug(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
     # Now safe to import CUDA-dependent code.
-    # This import triggers ensure_cuda_env() which initializes CUDA.
     logger.info("Importing geometry_generation module...")
     import_start = time.time()
-    try:
-        from scenesmith.agent_utils.geometry_generation_server.geometry_generation import (
-            generate_geometry_from_image,
-        )
+    from scenesmith.agent_utils.geometry_generation_server.geometry_generation import (
+        generate_geometry_from_image,
+    )
 
-        logger.info(
-            f"geometry_generation import completed in {time.time() - import_start:.2f}s"
-        )
-    except Exception as e:
-        logger.error(f"Failed to import geometry_generation: {e}")
-        raise
+    logger.info(
+        f"geometry_generation import completed in {time.time() - import_start:.2f}s"
+    )
 
-    # Preload pipeline if requested.
-    # Use init_lock to serialize checkpoint loading across workers.
-    # SAM3D checkpoints are ~15GB total; loading concurrently causes I/O contention.
+    # Preload pipeline if requested (serialized across workers by the parent,
+    # which starts workers one-at-a-time and waits for ready).
     if preload_pipeline:
-        logger.info(f"Waiting for init lock to preload {backend} pipeline...")
-        if init_lock is not None:
-            lock_start = time.time()
-            init_lock.acquire()
-            logger.info(f"Acquired init lock after {time.time() - lock_start:.2f}s")
-        try:
-            logger.info(f"Starting pipeline preload for {backend}...")
-            preload_start = time.time()
-            _preload_pipeline(
-                backend=backend, use_mini=use_mini, sam3d_config=sam3d_config
-            )
-            logger.info(
-                f"Pipeline preloaded successfully in {time.time() - preload_start:.2f}s"
-            )
-        except Exception as e:
-            logger.error(f"Pipeline preload failed: {e}")
-            raise
-        finally:
-            if init_lock is not None:
-                init_lock.release()
-                logger.info("Released init lock")
+        logger.info(f"Starting pipeline preload for {backend}...")
+        preload_start = time.time()
+        _preload_pipeline(backend=backend, use_mini=use_mini, sam3d_config=sam3d_config)
+        logger.info(f"Pipeline preloaded successfully in {time.time() - preload_start:.2f}s")
 
     # Track processing statistics.
     total_requests = 0
@@ -193,80 +172,82 @@ def gpu_worker_main(
     processing_times: list[float] = []
 
     # Signal that this worker is ready for requests.
-    # The pool waits for this signal before adding the worker to the available pool.
-    result_queue.put(WorkerReady(worker_id=gpu_id))
-
-    # Main processing loop.
+    send_message(connection, {"type": MSG_READY, "gpu_id": gpu_id})
     logger.info("Worker ready, waiting for requests...")
+
     while True:
         try:
-            message = work_queue.get()
+            message = recv_message(connection)
+        except EOFError:
+            logger.info("Socket closed by parent, exiting...")
+            break
 
-            # Check for shutdown signal.
-            if isinstance(message, ShutdownRequest):
-                logger.info("Received shutdown signal, exiting...")
-                break
+        msg_type = message.get("type")
+        if msg_type == MSG_SHUTDOWN:
+            logger.info("Received shutdown signal, exiting...")
+            break
 
-            if not isinstance(message, WorkRequest):
-                logger.warning(f"Received unknown message type: {type(message)}")
-                continue
+        if msg_type != MSG_REQUEST:
+            logger.warning(f"Received unknown message type: {msg_type!r}")
+            continue
 
-            # Process the request.
-            total_requests += 1
-            start_time = time.time()
+        # Process the request.
+        total_requests += 1
+        start_time = time.time()
+        request_id = message["request_id"]
+        received_timestamp = message["received_timestamp"]
 
-            try:
-                result_data = _process_request(
-                    request=message.request,
-                    generate_fn=generate_geometry_from_image,
-                    use_mini=use_mini,
-                )
+        try:
+            request = _request_from_dict(message["request"])
+            result_data = _process_request(
+                request=request,
+                generate_fn=generate_geometry_from_image,
+                use_mini=use_mini,
+            )
 
-                processing_time = time.time() - start_time
-                processing_times.append(processing_time)
-                # Keep only last 10000 times.
-                if len(processing_times) > 10000:
-                    processing_times.pop(0)
+            processing_time = time.time() - start_time
+            processing_times.append(processing_time)
+            # Keep only last 10000 times.
+            if len(processing_times) > 10000:
+                processing_times.pop(0)
 
-                completed_requests += 1
-                logger.info(
-                    f"Completed request {message.request_id} in {processing_time:.2f}s"
-                )
+            completed_requests += 1
+            logger.info(f"Completed request {request_id} in {processing_time:.2f}s")
 
-                end_to_end_latency = time.time() - message.received_timestamp
-                result_queue.put(
-                    WorkResult(
-                        request_id=message.request_id,
-                        worker_id=gpu_id,
-                        status="success",
-                        data={"geometry_path": result_data.geometry_path},
-                        error=None,
-                        processing_time_seconds=processing_time,
-                        end_to_end_latency_seconds=end_to_end_latency,
-                    )
-                )
-
-            except Exception as e:
-                processing_time = time.time() - start_time
-                end_to_end_latency = time.time() - message.received_timestamp
-                failed_requests += 1
-                logger.error(f"Request {message.request_id} failed: {e}")
-
-                result_queue.put(
-                    WorkResult(
-                        request_id=message.request_id,
-                        worker_id=gpu_id,
-                        status="error",
-                        data=None,
-                        error=str(e),
-                        processing_time_seconds=processing_time,
-                        end_to_end_latency_seconds=end_to_end_latency,
-                    )
-                )
+            end_to_end_latency = time.time() - received_timestamp
+            send_message(
+                connection,
+                {
+                    "type": MSG_RESULT,
+                    "request_id": request_id,
+                    "worker_id": gpu_id,
+                    "status": "success",
+                    "data": {"geometry_path": result_data.geometry_path},
+                    "error": None,
+                    "processing_time_seconds": processing_time,
+                    "end_to_end_latency_seconds": end_to_end_latency,
+                },
+            )
 
         except Exception as e:
-            logger.error(f"Worker loop error: {e}")
-            # Continue processing - don't let one error kill the worker.
+            processing_time = time.time() - start_time
+            end_to_end_latency = time.time() - received_timestamp
+            failed_requests += 1
+            logger.error(f"Request {request_id} failed: {e}")
+
+            send_message(
+                connection,
+                {
+                    "type": MSG_RESULT,
+                    "request_id": request_id,
+                    "worker_id": gpu_id,
+                    "status": "error",
+                    "data": None,
+                    "error": str(e),
+                    "processing_time_seconds": processing_time,
+                    "end_to_end_latency_seconds": end_to_end_latency,
+                },
+            )
 
     logger.info(
         f"Worker shutting down. Stats: {total_requests} total, "
@@ -302,6 +283,15 @@ def _preload_pipeline(backend: str, use_mini: bool, sam3d_config: dict | None) -
         SAM3DPipelineManager.get_pipelines(
             sam3_checkpoint=sam3_checkpoint, sam3d_checkpoint=sam3d_checkpoint
         )
+
+
+def _request_from_dict(data: dict) -> Any:
+    """Rebuild a GeometryGenerationServerRequest from a JSON-safe dict.
+
+    ``GeometryGenerationServerRequest.to_dict()`` only emits primitive fields
+    (via ``dataclasses.asdict``), so the request can be reconstructed directly.
+    """
+    return GeometryGenerationServerRequest(**data)
 
 
 def _process_request(

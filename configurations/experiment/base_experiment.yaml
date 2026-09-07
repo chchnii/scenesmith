@@ -42,6 +42,12 @@ pipeline:
 geometry_generation_server:
   host: "127.0.0.1"
   port: 7005
+  # Load the SAM3D pipeline on the first generation request instead of at server
+  # startup. Cold-starting SAM3D on H200/H100 takes ~50s, and server readiness
+  # defaulted to a 30s timeout, so the server failed before the pipeline was loaded.
+  preload_pipeline: false
+  # Max seconds to wait for the server to report ready after startup.
+  start_timeout: 180
 
 # HSSD retrieval server settings
 hssd_retrieval_server:
